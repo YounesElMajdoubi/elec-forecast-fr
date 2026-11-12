@@ -36,6 +36,6 @@ calendar.download_school_holidays(raw)
 
 if not args.sans_prix:
     print("== Prix day-ahead (ENTSO-E)")
-    px = prices.download_prices(s, e, raw / "prix")
+    px = prices.download_prices(s, prices.today_paris(), raw / "prix")   # jusqu'à aujourd'hui, pas seulement e
     px.to_frame("prix").to_parquet(raw / "prix_brut.parquet")
 print("Terminé.")

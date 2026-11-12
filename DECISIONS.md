@@ -273,3 +273,32 @@ Rapide (moins d'une seconde) et sans statsmodels, ce qui garde l'image Docker l�
 **Effet attendu du découpage** : le φ horaire, estimé après retrait de la moyenne de chaque jour, ne mesure plus que la persistance à l'intérieur d'une journée.
 **Graphique ajouté** : `simulation_moyenne_mensuelle.png`, avec l'intervalle 90 % du prix moyen de chaque mois face au prix moyen réel.
 **API.** `/simulate` renvoie aussi `phi_niveau_journalier` et `demi_vie_niveau_jours` quand la variante retenue a deux facteurs.
+
+## D38 — Résultats réels du modèle à deux facteurs (12/11/2026)
+**Le défaut visé est corrigé.** Couverture de la moyenne mensuelle par l'intervalle 90 % : 9 mois sur 12 sur la validation (contre 5 pour sauts + ancrage), 3 mois sur 12 sur le test (contre 2).
+**Mais le CRPS horaire est moins bon** : 24,6 contre 21,5 sur la validation, 36,7 contre 30,7 sur le test. La variante retenue reste sauts + ancrage, choisie par le CRPS sur la validation comme prévu (D33). L'API n'est pas modifiée.
+**Hypothèse.** Le niveau journalier part du dernier jour connu, une valeur bruitée, et il persiste presque tout le mois. L'ancrage, lui, part d'une moyenne sur 28 jours. Indice en faveur de cette hypothèse : avec deux facteurs, l'ancrage ne change presque rien (CRPS 24,64 contre 24,65), ce qui signale un φ_N proche de 1. À confirmer en affichant φ_N estimé.
+**Garde-fou méthodologique.** Les variantes ont maintenant été évaluées plusieurs fois sur le test. Toute variante supplémentaire, comme un départ lissé ou un troisième facteur, sera choisie sur la validation, puis jugée sur des mois jamais vus (novembre 2026 et après), pour ne pas sur-ajuster au test.
+
+## D39 — Passage aux prix ENTSO-E : comparer avant de remplacer (12/11/2026)
+**Contexte.** Le jeton ENTSO-E est arrivé. Ember republie les données d'ENTSO-E : les deux séries devraient être identiques, mais rien ne le garantit (raccords mensuels, heures manquantes, moyenne des quarts d'heure depuis le 01/10/2025).
+**Choix.** `14_compare_prices.py` télécharge ENTSO-E et compare les deux sources heure par heure avant toute bascule :
+- heures communes, et heures présentes dans une seule source (dont les 5 heures manquantes chez Ember, D29) ;
+- part des heures identiques à 0,01 €/MWh près, écart moyen, écart maximal et sa date ;
+- détail par année, et séparément avant et après le passage au quart d'heure.
+
+Les prix ENTSO-E sont ramenés à l'heure par la moyenne des quarts d'heure (D11), comme pour Ember.
+**Cache.** Une année en cache est retéléchargée si elle ne couvre pas la fin demandée : l'année en cours se complète à chaque lancement. Les prix vont jusqu'au jour du lancement, et plus seulement jusqu'au 31/10/2026, pour pouvoir juger les futures variantes sur les mois à partir de novembre 2026 (D38).
+**Résultat de la comparaison** (exécution du 12/11/2026, du 01/10/2021 au 09/11/2026, après correction des deux bugs ci-dessous) :
+- 44 779 heures communes, dont 99,90 % identiques à 0,01 €/MWh près ; écart absolu moyen de 0,023 €/MWh, écart moyen signé de +0,002 €/MWh.
+- 43 heures diffèrent, toutes avant le passage au quart d'heure. Depuis, l'écart maximal en 2026 est de 0,005 €/MWh : Ember ramène aussi les quarts d'heure à l'heure par la moyenne, la même convention que D11.
+- Les plus grands écarts désignent des défauts d'Ember. Le 24/07/2024, de 15 h à 19 h UTC, Ember répète 12,80 €/MWh pendant cinq heures, alors qu'ENTSO-E monte de 47 à 113 €/MWh. Le 01/01/2025 à 0 h (heure de Paris), Ember donne 60,18 €/MWh contre 12,36 chez ENTSO-E.
+- Les heures absentes d'Ember sont toutes des premières heures de mois : 01/08/2026 à 0 h et 1 h, 01/10/2026 à 0 h et 1 h, 01/11/2026 à 0 h. Cela confirme l'hypothèse d'un défaut de raccord mensuel (D29). ENTSO-E les contient.
+- Quelques écarts de 2022 (jusqu'à 96 €/MWh le 29/09/2022) restent inexpliqués ; ENTSO-E étant la source d'origine, c'est sa valeur qui est retenue.
+
+**Choix.** ENTSO-E devient la source des prix. Les deux séries concordant à 99,9 %, les résultats du volet 2 devraient très peu bouger ; on les recalcule quand même (11, 12, 13), et les chiffres du README sont remplacés par ceux de cette exécution. Ce n'est pas un nouveau choix de modèle sur le test : la règle de sélection (CRPS sur la validation) reste la même, seules les données sont corrigées.
+**Bug corrigé au passage.** `entsoe-py` renvoie aussi l'instant de fin demandé : la dernière heure ne contenait qu'un quart d'heure, et sa « moyenne » n'aurait été que ce quart d'heure. Le téléchargement s'arrête désormais avant cet instant, et `to_hourly` retire toute heure incomplète.
+**Second bug, vu à la deuxième comparaison.** ENTSO-E semblait manquer 4 heures : le 31 décembre à 0 h (heure de Paris) en 2022, 2023, 2024 et 2025. Ce n'est pas un trou d'ENTSO-E mais d'`entsoe-py` : la bibliothèque élargit chaque demande d'un jour de chaque côté, découpe ce qui dépasse un an en blocs annuels, et perd le point situé à la jonction des blocs (son code garde `index <= fin` dans le premier bloc, `index > début` dans le second, alors que l'API ne renvoie pas le point de fin). Les prix sont maintenant demandés mois par mois, ce qui n'est jamais découpé. Un test reproduit le défaut avec un faux client. Les fichiers de cache changent de nom (`_mensuel`) : les anciens, troués, sont ignorés et refaits.
+**Prix négatifs : une question de définition.** Sur le test, la part d'heures négatives passe de 5,4 % (Ember) à 6,5 % (ENTSO-E), alors que les prix concordent à 0,005 €/MWh près en 2026. Hypothèse : depuis le passage au quart d'heure, la moyenne de quatre quarts d'heure peut être à peine négative (par exemple −0,0025 €/MWh) ; Ember, qui arrondit au centime, l'écrit 0. Vérifié : sur les heures communes, Ember compte 1 488 heures négatives et ENTSO-E 1 587 ; les 99 heures d'écart sont toutes entre −0,01 et 0 €/MWh chez ENTSO-E et à 0 chez Ember. On garde la définition stricte (prix < 0) : économiquement, ces heures sont des prix nuls, et l'écart de définition est signalé là où la part de négatifs est citée.
+
+**Résultats du volet 2 avec ENTSO-E** (exécution du 12/11/2026, après correction) : 0 heure manquante. La variante retenue sur la validation ne change pas (sauts + ancrage) : CRPS 21,51 sur la validation (21,45 avec Ember), couverture à 90 % de 88,9 % ; sur le test, CRPS 30,69 (30,67), couverture 70,8 % (71,1 %), moyenne mensuelle couverte 2 mois sur 12. Les diagnostics de l'exploration sont inchangés (φ = 0,9728, demi-vie 25,2 h). Les chiffres du README sont ceux de cette exécution.
