@@ -77,3 +77,15 @@ def test_openapi_documents_response_fields(client):
     schemas = client.get("/openapi.json").json()["components"]["schemas"]
     assert {"Prevision", "Heure", "Sante", "Simulation", "QuantilesHeure"} <= set(schemas)
     assert "prevision_mw" in schemas["Heure"]["properties"]
+
+
+def test_dockerfile_sets_every_path_variable_read_by_the_api():
+    """Dans l'image, le code est installé dans site-packages : chaque variable
+    ELECFR_* lue par l'API doit être fixée dans le Dockerfile, sinon le fichier
+    monté n'est pas trouvé (bug vu le 12/11/2026 : /simulate répondait 503)."""
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    lues = set(re.findall(r'environ\.get\("(ELECFR_[A-Z_]+)"', (root / "src/elecfr/api.py").read_text(encoding="utf-8")))
+    docker = (root / "Dockerfile").read_text(encoding="utf-8")
+    assert lues and all(v + "=" in docker for v in lues), sorted(v for v in lues if v + "=" not in docker)

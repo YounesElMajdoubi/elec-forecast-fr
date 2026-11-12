@@ -57,19 +57,19 @@ class Prevision(BaseModel):
     entraine_au: str = Field(examples=["2026-10-31"])
     dans_la_periode_d_entrainement: bool = Field(
         description="Vrai si le jour a servi à l'entraînement : l'erreur affichée est alors optimiste")
-    avertissement: str | None = None
-    mae_jour_mw: float | None = Field(description="Erreur absolue moyenne du jour, si le réel est connu")
+    avertissement: str | None = Field(None, examples=["Jour vu à l'entraînement : l'erreur affichée est optimiste. Les performances honnêtes sont celles du walk-forward (README)."])
+    mae_jour_mw: float | None = Field(description="Erreur absolue moyenne du jour, si le réel est connu", examples=[445.9])
     heures: list[Heure] = Field(description="23, 24 ou 25 heures selon les changements d'heure")
 
 
 class QuantilesHeure(BaseModel):
     heure_locale: str = Field(examples=["2026-10-15T19:00:00+02:00"])
-    q05: float
-    q25: float
-    q50: float = Field(description="Médiane des trajectoires (€/MWh)")
-    q75: float
-    q95: float
-    reel: float | None = Field(description="Prix réel, s'il est déjà connu (€/MWh)")
+    q05: float = Field(description="Quantile 5 % des trajectoires (€/MWh)", examples=[98.4])
+    q25: float = Field(examples=[121.7])
+    q50: float = Field(description="Médiane des trajectoires (€/MWh)", examples=[136.2])
+    q75: float = Field(examples=[151.0])
+    q95: float = Field(description="Quantile 95 % des trajectoires (€/MWh)", examples=[176.5])
+    reel: float | None = Field(description="Prix réel, s'il est déjà connu (€/MWh)", examples=[182.3])
 
 
 class Simulation(BaseModel):

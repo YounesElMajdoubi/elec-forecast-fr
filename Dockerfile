@@ -22,7 +22,10 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install --no-cache-dir --no-deps .
 
+# Chemins des fichiers montés. Le code est installé dans site-packages : sans ces
+# variables, il chercherait data/ à côté de son propre dossier, pas dans /app.
 ENV ELECFR_DATA=/app/data/processed/dataset_horaire.parquet \
+    ELECFR_PRIX=/app/data/processed/prix_horaires.parquet \
     ELECFR_MODELS=/app/models
 
 # Utilisateur sans privilèges
