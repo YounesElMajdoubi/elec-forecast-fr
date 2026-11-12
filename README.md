@@ -77,6 +77,12 @@ python scripts/07_ensemble.py            # combinaison des modèles (poids chois
 python scripts/08_figures.py             # graphiques du README (reports/figures/)
 python scripts/09_train_final.py         # modèle servi par l'API (models/)
 uvicorn elecfr.api:app --reload          # API : http://127.0.0.1:8000/docs
+
+# Volet 2 : prix (fichier Ember dans data/raw/ember/, voir plus bas)
+python scripts/10_inspect_ember.py       # vérifie le fichier de prix
+python scripts/11_build_prices.py        # jeu de prix horaire (--source entsoe avec le jeton)
+python scripts/12_explore_prices.py      # analyse exploratoire + diagnostics statsmodels
+python scripts/13_simulate_prices.py     # 1 000 trajectoires par mois, validation, MLflow
 mlflow ui --backend-store-uri sqlite:///mlflow.db   # http://127.0.0.1:5000
 ```
 
@@ -164,7 +170,7 @@ uvicorn elecfr.api:app --reload          # documentation interactive : http://12
 |---|---|
 | `GET /health` | état, modèle chargé, période des données |
 | `GET /forecast?date=AAAA-MM-JJ` | prévision horaire du jour (heure de Paris), avec la valeur réelle et la prévision RTE quand elles existent |
-| `GET /simulate?month=AAAA-MM` | simulation des prix : renvoie 501 tant que le volet 2 n'existe pas |
+| `GET /simulate?month=AAAA-MM` | 1 000 trajectoires horaires du prix day-ahead du mois : quantiles 5, 25, 50, 75 et 95 % par heure, prix moyen du mois, et couverture si les prix réels sont connus |
 
 - **Modèle servi : LightGBM.** Le LSTM est 8 % plus précis, mais imposerait PyTorch dans l'image (voir DECISIONS.md, D25).
 - **Mode « rejeu ».** L'API prévoit tout jour présent dans le jeu de données, avec les variables connues la veille. Pour un jour vu à l'entraînement, la réponse le signale (`dans_la_periode_d_entrainement`) : l'erreur affichée y est optimiste.
@@ -179,6 +185,62 @@ docker run --rm -p 8000:8000 -v "$PWD/data:/app/data" -v "$PWD/models:/app/model
 
 L'image ne contient que les dépendances de l'API (pas MLflow, deltalake ni PyTorch) ; le jeu de données et le modèle sont montés au lancement. GitHub Actions lance les tests (sauf ceux du LSTM, qui demandent PyTorch) puis construit l'image à chaque push.
 
+## Volet 2 : simulation des prix day-ahead
+
+**Données.** Prix day-ahead horaires de la France publiés par [Ember](https://ember-energy.org/data/european-wholesale-electricity-price-data) (source d'origine : ENTSO-E ; licence CC BY 4.0), de 2015 à novembre 2026. Ils sont utilisés en attendant l'accès à l'API ENTSO-E ; le passage de l'une à l'autre se fait par une option (`--source entsoe`), et les deux séries seront comparées heure par heure.
+
+**Modèle** (`src/elecfr/simulation.py`) : prix = partie déterministe + résidu.
+- **Partie déterministe** (moindres carrés) : profil de 24 heures pour chacun des 3 types de jour (semaine, samedi, dimanche/férié), saisonnalité annuelle (2 harmoniques), tendance.
+- **Résidu à retour à la moyenne** : AR(1) horaire, x(t) = φ·x(t−1) + ε(t), version discrète d'un processus d'Ornstein-Uhlenbeck (demi-vie ln 2 / −ln φ). φ est contre-vérifié avec statsmodels (`AutoReg`), et la stationnarité du résidu par un test ADF.
+- **Sauts** : les chocs supérieurs à 4 écarts-types robustes sont modélisés à part (probabilité horaire et tailles observées, positives et négatives). Le reste des chocs est gaussien.
+- **Variante « ancrage »** : niveau recalé sur les 28 derniers jours connus.
+
+**Protocole.** Pour chaque mois, le modèle est estimé sur les 24 mois précédents, puis 1 000 trajectoires horaires du mois sont simulées. Les trois variantes (base, sauts, sauts + ancrage) sont comparées sur la validation (nov. 2024 → oct. 2025) par le CRPS, une règle de score qui juge à la fois la justesse et la largeur des intervalles. La variante retenue est évaluée une seule fois sur le test (nov. 2025 → oct. 2026).
+
+**Validation face aux prix réels.**
+- Couverture des intervalles à 90 % et à 50 % (cibles : 90 % et 50 %).
+- Largeur des intervalles.
+- CRPS.
+- Erreur de la médiane.
+- Part des prix négatifs simulés et réels.
+- Couverture du prix moyen mensuel.
+- Histogramme PIT : plat si le modèle est bien calibré.
+
+### Ce que montrent les données (exploration, 2024 → oct. 2026)
+
+- **La « courbe en canard ».** Les prix sont au plus bas vers 13–14 h, quand le solaire produit le plus, et au plus haut vers 19–22 h. L'écart entre les deux atteint 70 à 81 €/MWh selon le type de jour.
+- **Des prix négatifs de plus en plus fréquents.** 352 heures en 2024, 507 en 2025, 475 en 2026 jusqu'au 9 novembre. Ils touchent 5,4 % des heures depuis 2024, et 22 % des jours à 14 h. Ils surviennent quand l'éolien et le solaire couvrent 31 % de la consommation en moyenne, contre 18 % le reste du temps.
+- **Les renouvelables pèsent plus que la consommation.** Corrélation de rang du prix avec la part éolien + solaire : −0,58 ; avec la consommation : +0,29.
+- **Le niveau change d'une année à l'autre.** Moyenne annuelle de 276 €/MWh pendant la crise de 2022, 58 en 2024, 61 en 2025, 95 en 2026. La moyenne mensuelle grimpe de 66 €/MWh en juin 2026 à 166 €/MWh en octobre 2026.
+- **Le résidu revient bien vers sa moyenne, mais lentement**, avec une mémoire longue (diagnostics statsmodels, 24 mois avant la validation) :
+  - le test ADF confirme la stationnarité (p < 0,0001) ;
+  - φ = 0,973, soit une demi-vie de 25 h ;
+  - l'autocorrélation vaut 0,84 à 24 h, contre 0,52 attendus pour un AR(1) pur, et 0,57 à une semaine.
+
+### Résultats de la simulation (exécution réelle du 12/11/2026)
+
+| Variante | CRPS validation | Couv. 90 % validation | CRPS test | Couv. 90 % test | Couv. 50 % test | Négatifs simulés / réels (test) | Moyenne mensuelle dans l'intervalle 90 % (test) |
+|---|---|---|---|---|---|---|---|
+| Base (AR(1)) | 26,6 | 81,1 % | 37,4 | 62,2 % | 33,8 % | 11,6 % / 5,4 % | 1 mois sur 12 |
+| + sauts | 26,1 | 81,4 % | 37,2 | 61,4 % | 31,8 % | 10,6 % / 5,4 % | 1 mois sur 12 |
+| **+ sauts + ancrage (retenue)** | **21,5** | **89,0 %** | **30,7** | **71,1 %** | **30,8 %** | **8,3 % / 5,4 %** | **2 mois sur 12** |
+
+CRPS en €/MWh (plus petit = meilleur). Cibles de couverture : 90 % et 50 %.
+
+**Lecture :**
+- **L'ancrage est l'amélioration décisive** : le CRPS baisse de 18 à 19 %, sur la validation comme sur le test, et le classement des variantes est le même sur les deux périodes. Les sauts n'apportent presque rien (−2 % sur la validation).
+- **Sur la validation, la variante retenue est presque bien calibrée** (89 % de couverture à 90 %). **Sur le test, elle ne l'est plus** (71 %). Le test contient une forte hausse continue des prix, de juin à octobre 2026, qu'aucune information passée ne laissait prévoir.
+- **Le défaut principal est l'incertitude sur le niveau du mois.** Le prix moyen réel ne tombe dans l'intervalle 90 % simulé que 2 mois sur 12. Dans un AR(1) de demi-vie 25 h, les écarts se compensent en quelques jours, si bien que la moyenne d'un mois simulé varie très peu. Les vrais prix, eux, restent durablement hauts ou bas (autocorrélation de 0,57 à une semaine), car leur niveau dépend du gaz, du CO2 et de la disponibilité nucléaire, absents du modèle.
+- **L'ancrage sur 28 jours réagit parfois trop fort.** En février 2026, il prolonge un mois de janvier cher (101 €/MWh) alors que les prix retombent (46 €/MWh réels, contre 83 à 104 simulés). En mars et en mai 2026, il part de mois bas et sous-estime nettement.
+- **Les prix négatifs sont trop fréquents dans les simulations** : 8,3 % contre 5,4 %. Un bruit symétrique autour d'un creux de mi-journée déjà bas passe trop souvent sous zéro.
+- **Quand le niveau est stable, le modèle fonctionne** : en novembre et décembre 2025, la couverture atteint 89–90 %.
+
+**Pistes, par ordre d'impact attendu :**
+1. Un modèle à deux facteurs : un niveau journalier lent et persistant, plus l'écart horaire rapide. Il donnerait une incertitude réaliste sur la moyenne du mois.
+2. Un AR à décalages 1 h et 24 h, pour la mémoire journalière.
+3. Une volatilité qui dépend de l'heure et du niveau.
+4. Le prix du gaz comme variable explicative, si une source gratuite est disponible.
+
 ## Choix méthodologiques
 
 Voir [DECISIONS.md](DECISIONS.md).
@@ -189,3 +251,4 @@ Voir [DECISIONS.md](DECISIONS.md).
 - Open-Meteo : API Previous Runs (prévisions archivées) et Archive (observations, analyse seulement)
 - ENTSO-E Transparency Platform : prix day-ahead, zone France
 - Calendrier scolaire : data.education.gouv.fr ; jours fériés : bibliothèque `holidays`
+- Prix day-ahead (volet 2) : Ember, *European Wholesale Electricity Price Data* (CC BY 4.0), d'après ENTSO-E

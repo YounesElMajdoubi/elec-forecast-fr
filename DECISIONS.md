@@ -205,3 +205,54 @@ Motivation (D24) : les faiblesses du LSTM (fêtes, août) et de LightGBM (vagues
 **Constat.** Sur le poste Windows (Python 3.14, après l'installation de PyTorch 2.10), `09_train_final.py` a échoué : « scikit-learn is required for lightgbm.sklearn ». Pourtant, lancé seul, LightGBM voit bien scikit-learn. Le problème dépend donc de ce qui est importé avant (MLflow en tête du script). Il ne se reproduit pas sous Python 3.13. Cause exacte non établie.
 **Choix.** L'entraînement final passe par l'interface native `lgb.train`, avec exactement les mêmes réglages (`native_params`, qui fait correspondre les noms scikit-learn et les noms natifs) et le même filtrage des lignes. Un test vérifie que les prévisions sont identiques à celles de l'interface scikit-learn utilisée dans le walk-forward. LightGBM est aussi importé avant MLflow dans `09`.
 **Bénéfice.** Ni l'entraînement final ni l'API ne dépendent plus de scikit-learn, ce qui allège aussi l'image Docker.
+
+## D29 — Volet 2 : prix Ember en attendant ENTSO-E (12/11/2026)
+**Choix.** Les prix horaires de la France viennent du fichier public d'Ember, qui republie les données d'ENTSO-E (CC BY 4.0, citation obligatoire), en attendant le jeton ENTSO-E.
+**Vérification** (`10_inspect_ember.py`) : fichier `France.csv`, pas horaire, de janvier 2015 au 9 novembre 2026, 5 heures manquantes sur toute la période. La fenêtre du projet est couverte à 100 %.
+**Format.** Il n'est pas documenté par Ember. Le lecteur reconnaît donc les colonnes par leur nom et s'arrête avec un message explicite sinon. Sa sortie est identique à celle du lecteur ENTSO-E.
+**Heures manquantes.** Le fichier Ember compte 5 heures manquantes. Deux d'entre elles sont la première heure d'un mois, en heure de Paris : le 1er octobre 2026 à 0 h et le 1er novembre 2026 à 0 h (vu dans les réponses de `/simulate`). C'est peut-être un défaut de raccord mensuel chez Ember, à vérifier contre ENTSO-E. Ces heures sont exclues de l'évaluation, sans effet sur l'estimation.
+**À faire avec le jeton.** Comparer les deux séries heure par heure, puis relancer les scripts 11 à 13 avec `--source entsoe`.
+
+## D30 — Modèle de prix : déterministe + AR(1) (Ornstein-Uhlenbeck discret)
+**Partie déterministe** (moindres carrés) :
+- 72 indicatrices heure × type de jour (semaine, samedi, dimanche/férié) ;
+- 2 harmoniques annuelles ;
+- une tendance linéaire.
+
+**Résidu.** AR(1) horaire. φ est estimé par régression de x(t) sur x(t−1), sur les paires d'heures consécutives connues.
+**Implémentation en NumPy**, pour que le script de validation et l'API partagent la même fonction (`simulate_month`). statsmodels sert à la contre-vérification : `AutoReg` donne le même φ que NumPy, et le test ADF établit la stationnarité qui justifie un retour à la moyenne. Il sert aussi au diagnostic, avec les autocorrélations à 1 h, 24 h et 168 h.
+**Prix bruts, sans logarithme** : les prix négatifs l'interdisent.
+
+## D31 — Sauts
+**Détection.** Un choc est un saut si |ε − médiane| > 4 × écart-type robuste (1,4826 × MAD). L'écart-type classique serait lui-même gonflé par les sauts.
+**Simulation.** À chaque heure, un saut survient avec la probabilité observée. Sa taille est tirée parmi les sauts réellement observés, pics vers le haut comme prix négatifs, sans imposer de loi. Les autres chocs sont gaussiens, avec l'écart-type calculé hors sauts. Les sauts se résorbent ensuite par le même retour à la moyenne.
+**Pourquoi.** Sans sauts, la seule façon d'expliquer les pics est un écart-type élevé, ce qui donne des intervalles trop larges en temps normal et trop étroits lors des pics. Sur données factices construites avec des sauts, le modèle de base sur-couvre (environ 94 % pour une cible de 90 %) ; la variante avec sauts tombe juste (88 %).
+
+## D32 — Variante « ancrage »
+Le niveau déterministe est recalé sur la moyenne des 28 derniers jours connus.
+**Motivation.** Le niveau des prix change avec le gaz et le CO2 : 61 €/MWh en moyenne en 2025, 95 €/MWh en 2026. Une tendance estimée sur 24 mois réagit trop lentement à de tels changements.
+**Choix.** C'est une variante candidate, retenue ou non sur la validation comme les autres.
+
+## D33 — Protocole de simulation et de validation
+- **Simulation mensuelle.** Pour chaque mois, estimation sur les 24 mois précédents, puis 1 000 trajectoires. Les prix d'un jour sont publiés la veille, donc tout ce qui précède le 1er du mois est connu.
+- **Choix de la variante par le CRPS moyen sur la validation.** Le CRPS est une règle de score propre : il est minimal quand la loi simulée est la vraie, et pénalise aussi bien des intervalles faux que des intervalles trop larges. La couverture seule récompenserait des intervalles immenses.
+- **Une seule passe sur le test**, avec la variante retenue. Les autres variantes sont aussi évaluées sur le test, pour la discussion, mais ne servent pas au choix.
+
+## D34 — Ce qui n'est pas fait (volet 2)
+- **Prix dépendant de la consommation prévue.** Le cahier des charges propose les sauts ou la consommation : les sauts sont faits. Pour simuler un mois entier, il faudrait des scénarios de consommation sur tout le mois, car la prévision du volet 1 ne porte que sur le lendemain. Ce serait une variante « conditionnelle » à J+1.
+- **Mémoire journalière du résidu.** Un AR(1) ignore la dépendance à 24 h. Le diagnostic la mesure (autocorrélation à 24 h comparée à φ^24) ; une extension serait un AR à décalages 1 et 24.
+
+## D35 — /simulate dans l'API
+Même fonction que la validation (`simulation.simulate_month`), avec la variante retenue lue dans `models/simulation_prix.json` (écrit par le script 13).
+**Réponses de l'API :**
+- les quantiles horaires et ceux du prix moyen du mois ;
+- la couverture, si les prix réels du mois sont connus ;
+- 503 sans données de prix, 422 si les prix précédant le mois sont inconnus.
+
+Rapide (moins d'une seconde) et sans statsmodels, ce qui garde l'image Docker légère.
+
+## D36 — Résultats réels de la simulation (12/11/2026)
+**Variante retenue sur la validation : sauts + ancrage.** CRPS 21,5 €/MWh, contre 26,1 avec les sauts seuls et 26,6 pour la base ; couverture à 90 % de 89 %. Le classement des variantes est le même sur le test.
+**Calibration dégradée sur le test.** Couverture à 90 % de 71 % (CRPS 30,7). La moyenne mensuelle réelle tombe dans l'intervalle 90 % simulé 2 mois sur 12. L'histogramme PIT est en U et penche à droite : les prix réels dépassent souvent toutes les trajectoires, au moment où ils montent de 66 à 166 €/MWh entre juin et octobre 2026.
+**Diagnostic.** La mémoire longue des prix (autocorrélation de 0,57 à une semaine) et leur niveau, porté par le gaz, le CO2 et la disponibilité nucléaire, échappent à un AR(1) de demi-vie 25 h. L'amplitude journalière grandit avec le niveau, alors que le modèle suppose une variance constante. Les prix négatifs sont simulés trop souvent (8,3 % contre 5,4 %).
+**Suite logique.** Un modèle à deux facteurs (niveau journalier lent + écart horaire rapide), une volatilité dépendant du niveau, et un AR à décalages 1 h et 24 h. Détail et chiffres dans le README.

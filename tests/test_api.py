@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from elecfr import serving  # noqa: E402
 from test_models import fake  # noqa: E402
+from test_simulation import fake_prices  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -22,6 +23,8 @@ def client(tmp_path_factory):
     import os
     os.environ["ELECFR_DATA"] = str(tmp / "dataset.parquet")
     os.environ["ELECFR_MODELS"] = str(tmp / "models")
+    fake_prices(start="2023-01-01", end="2025-03-10").to_parquet(tmp / "prix.parquet")
+    os.environ["ELECFR_PRIX"] = str(tmp / "prix.parquet")
     from elecfr.api import app
     with TestClient(app) as c:
         yield c
@@ -55,10 +58,22 @@ def test_errors(client):
     assert client.get("/forecast", params={"date": "2030-01-01"}).status_code == 404
     assert client.get("/forecast", params={"date": "pas-une-date"}).status_code == 422
     assert client.get("/forecast").status_code == 422
-    assert client.get("/simulate", params={"month": "2026-11"}).status_code == 501
+    assert client.get("/simulate", params={"month": "2026-11"}).status_code == 422   # pas de prix avant
+    assert client.get("/simulate", params={"month": "mars"}).status_code == 422
+
+
+def test_simulate_returns_quantiles_per_hour(client):
+    r = client.get("/simulate", params={"month": "2025-03", "n": 200})
+    assert r.status_code == 200
+    b = r.json()
+    assert len(b["heures"]) == 31 * 24 - 1 and b["n_trajectoires"] == 200
+    h = b["heures"][100]
+    assert h["q05"] <= h["q25"] <= h["q50"] <= h["q75"] <= h["q95"]
+    assert h["reel"] is not None and b["couverture_90_reel"] is not None   # 1er au 9 mars connus
+    assert b["heures"][-1]["reel"] is None                                 # fin de mois inconnue
 
 
 def test_openapi_documents_response_fields(client):
     schemas = client.get("/openapi.json").json()["components"]["schemas"]
-    assert {"Prevision", "Heure", "Sante"} <= set(schemas)
+    assert {"Prevision", "Heure", "Sante", "Simulation", "QuantilesHeure"} <= set(schemas)
     assert "prevision_mw" in schemas["Heure"]["properties"]
