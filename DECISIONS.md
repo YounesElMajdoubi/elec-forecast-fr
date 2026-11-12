@@ -256,3 +256,20 @@ Rapide (moins d'une seconde) et sans statsmodels, ce qui garde l'image Docker l�
 **Calibration dégradée sur le test.** Couverture à 90 % de 71 % (CRPS 30,7). La moyenne mensuelle réelle tombe dans l'intervalle 90 % simulé 2 mois sur 12. L'histogramme PIT est en U et penche à droite : les prix réels dépassent souvent toutes les trajectoires, au moment où ils montent de 66 à 166 €/MWh entre juin et octobre 2026.
 **Diagnostic.** La mémoire longue des prix (autocorrélation de 0,57 à une semaine) et leur niveau, porté par le gaz, le CO2 et la disponibilité nucléaire, échappent à un AR(1) de demi-vie 25 h. L'amplitude journalière grandit avec le niveau, alors que le modèle suppose une variance constante. Les prix négatifs sont simulés trop souvent (8,3 % contre 5,4 %).
 **Suite logique.** Un modèle à deux facteurs (niveau journalier lent + écart horaire rapide), une volatilité dépendant du niveau, et un AR à décalages 1 h et 24 h. Détail et chiffres dans le README.
+
+## D37 — Modèle à deux facteurs (12/11/2026)
+**Motivation** (D36). Le prix moyen réel ne tombait dans l'intervalle 90 % simulé que 2 mois sur 12. Avec un seul facteur à demi-vie d'environ 12 à 25 h, les écarts se compensent en quelques jours, et la moyenne d'un mois simulé ne varie presque pas.
+**Modèle.** résidu(t) = N(jour) + u(t).
+- **N, le niveau journalier**, est la moyenne du résidu sur le jour local, modélisée par un AR(1) quotidien. Ses chocs sont tirés parmi les chocs journaliers observés, ce qui conserve leurs queues épaisses.
+- **u, l'écart horaire** autour de ce niveau, est un AR(1) horaire avec sauts, comme avant.
+- **L'ancrage**, s'il est demandé, porte sur le niveau de départ.
+
+**Variantes ajoutées** : `deux_facteurs` et `deux_facteurs_ancrage`. Elles sont choisies ou non sur la validation par le CRPS, avec le même protocole ; le test reste joué une seule fois.
+**Vérifications** (données factices) :
+- sur une série à vrai niveau persistant (φ_N = 0,9), φ_N est retrouvé (0,889) ;
+- l'écart-type de la moyenne mensuelle simulée vaut 19,0 €/MWh, pour 20,5 en théorie (AR(1) de départ connu) ;
+- sur une série SANS niveau persistant, la validation garde le modèle à un facteur : la complexité n'est retenue que si les données la justifient.
+
+**Effet attendu du découpage** : le φ horaire, estimé après retrait de la moyenne de chaque jour, ne mesure plus que la persistance à l'intérieur d'une journée.
+**Graphique ajouté** : `simulation_moyenne_mensuelle.png`, avec l'intervalle 90 % du prix moyen de chaque mois face au prix moyen réel.
+**API.** `/simulate` renvoie aussi `phi_niveau_journalier` et `demi_vie_niveau_jours` quand la variante retenue a deux facteurs.

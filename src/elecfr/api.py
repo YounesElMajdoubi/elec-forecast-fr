@@ -84,6 +84,11 @@ class Simulation(BaseModel):
     demi_vie_heures: float = Field(description="Temps pour qu'un écart au prix « normal » soit divisé par deux",
                                    examples=[12.76])
     probabilite_saut_par_heure: float = Field(examples=[0.0211])
+    phi_niveau_journalier: float | None = Field(
+        None, description="Persistance du niveau journalier, d'un jour au suivant (modèle à deux facteurs)",
+        examples=[0.93])
+    demi_vie_niveau_jours: float | None = Field(
+        None, description="Temps pour qu'un écart de niveau journalier soit divisé par deux", examples=[9.6])
     prix_moyen_du_mois: dict[str, float] = Field(description="Quantiles 5 %, 50 %, 95 % du prix moyen simulé du mois",
                                                  examples=[{"q05": 123.7, "q50": 139.3, "q95": 155.9}])
     couverture_90_reel: float | None = Field(description="Part des heures réelles dans l'intervalle 5 %–95 %, si connues",
@@ -170,6 +175,8 @@ def simulate(month: str = Query(..., description="Mois à simuler, AAAA-MM", exa
         "estime_du": model.infos["entraine_du"], "estime_au": model.infos["entraine_au"],
         "phi": round(model.phi, 4), "demi_vie_heures": round(model.demi_vie_h, 2),
         "probabilite_saut_par_heure": round(model.p_saut, 5),
+        "phi_niveau_journalier": round(model.phi_n, 4) if model.deux_facteurs else None,
+        "demi_vie_niveau_jours": round(model.demi_vie_niveau_j, 2) if model.deux_facteurs else None,
         "prix_moyen_du_mois": {k: round(float(np.quantile(moy, v)), 2) for k, v in (("q05", .05), ("q50", .5), ("q95", .95))},
         "couverture_90_reel": (round(float(((reel >= q[0]) & (reel <= q[4]))[known].mean()), 3) if known.any() else None),
         "heures": heures,

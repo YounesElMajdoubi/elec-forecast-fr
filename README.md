@@ -194,8 +194,9 @@ L'image ne contient que les dépendances de l'API (pas MLflow, deltalake ni PyTo
 - **Résidu à retour à la moyenne** : AR(1) horaire, x(t) = φ·x(t−1) + ε(t), version discrète d'un processus d'Ornstein-Uhlenbeck (demi-vie ln 2 / −ln φ). φ est contre-vérifié avec statsmodels (`AutoReg`), et la stationnarité du résidu par un test ADF.
 - **Sauts** : les chocs supérieurs à 4 écarts-types robustes sont modélisés à part (probabilité horaire et tailles observées, positives et négatives). Le reste des chocs est gaussien.
 - **Variante « ancrage »** : niveau recalé sur les 28 derniers jours connus.
+- **Modèle à deux facteurs** : le résidu est séparé en un niveau journalier lent (AR(1) d'un jour sur l'autre, chocs tirés parmi ceux observés) et un écart horaire rapide (AR(1) horaire avec sauts). Il vise l'incertitude sur le niveau du mois (voir les résultats ci-dessous).
 
-**Protocole.** Pour chaque mois, le modèle est estimé sur les 24 mois précédents, puis 1 000 trajectoires horaires du mois sont simulées. Les trois variantes (base, sauts, sauts + ancrage) sont comparées sur la validation (nov. 2024 → oct. 2025) par le CRPS, une règle de score qui juge à la fois la justesse et la largeur des intervalles. La variante retenue est évaluée une seule fois sur le test (nov. 2025 → oct. 2026).
+**Protocole.** Pour chaque mois, le modèle est estimé sur les 24 mois précédents, puis 1 000 trajectoires horaires du mois sont simulées. Les cinq variantes (base, sauts, sauts + ancrage, deux facteurs avec et sans ancrage) sont comparées sur la validation (nov. 2024 → oct. 2025) par le CRPS, une règle de score qui juge à la fois la justesse et la largeur des intervalles. La variante retenue est évaluée une seule fois sur le test (nov. 2025 → oct. 2026).
 
 **Validation face aux prix réels.**
 - Couverture des intervalles à 90 % et à 50 % (cibles : 90 % et 50 %).

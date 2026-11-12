@@ -21,6 +21,16 @@ Modèle : prix(t) = partie déterministe(t) + résidu(t)
 4. Option « ancrage » : la partie déterministe est recalée pour que sa
    moyenne sur les N derniers jours connus égale le prix moyen observé
    sur ces jours. Utile quand le niveau des prix change (prix du gaz, du CO2).
+5. Option « deux facteurs » : le résidu est séparé en
+       résidu(t) = N(jour) + u(t)
+   - N : niveau journalier (moyenne du résidu sur le jour local), lent et
+     persistant, AR(1) jour après jour : N(j) = φ_N·N(j-1) + η(j), avec des
+     chocs η tirés parmi les chocs journaliers observés (queues épaisses) ;
+   - u : écart horaire autour de ce niveau, AR(1) horaire avec sauts (1-3).
+   Dans le modèle à un facteur, les écarts se compensent en quelques
+   heures : la moyenne d'un mois simulé ne varie presque pas, alors que les
+   vrais prix restent durablement hauts ou bas. Le niveau journalier
+   persistant redonne cette incertitude sur le niveau du mois.
 
 Tout est en NumPy pur (pas de statsmodels ici) : la même fonction sert au
 script de validation et à l'API, sans seconde implémentation.
@@ -70,14 +80,34 @@ class PriceModel:
     sauts: np.ndarray = field(default_factory=lambda: np.array([]))
     decalage: float = 0.0            # recalage du niveau (ancrage)
     dernier_residu: float = 0.0      # écart au « normal » à la dernière heure connue
+    # Deux facteurs : niveau journalier N (AR(1) quotidien)
+    deux_facteurs: bool = False
+    phi_n: float = 0.0
+    chocs_n: np.ndarray = field(default_factory=lambda: np.array([]))
+    dernier_niveau: float = 0.0
     infos: dict = field(default_factory=dict)
 
     @property
     def demi_vie_h(self) -> float:
         return float(np.log(2) / -np.log(self.phi)) if 0 < self.phi < 1 else float("inf")
 
+    @property
+    def demi_vie_niveau_j(self) -> float | None:
+        if not self.deux_facteurs:
+            return None
+        return float(np.log(2) / -np.log(self.phi_n)) if 0 < self.phi_n < 1 else float("inf")
 
-def fit(prix: pd.Series, cal: pd.DataFrame, sauts: bool = True, ancrage_jours: int | None = None) -> PriceModel:
+
+def _ar1(series: np.ndarray) -> tuple[float, np.ndarray]:
+    """φ par moindres carrés sur les paires consécutives connues, et les chocs."""
+    r, r1 = series[1:], series[:-1]
+    pair = ~np.isnan(r) & ~np.isnan(r1)
+    phi = float(np.dot(r1[pair], r[pair]) / np.dot(r1[pair], r1[pair]))
+    return phi, r[pair] - phi * r1[pair]
+
+
+def fit(prix: pd.Series, cal: pd.DataFrame, sauts: bool = True, ancrage_jours: int | None = None,
+        deux_facteurs: bool = False) -> PriceModel:
     """Estime le modèle sur une fenêtre d'heures consécutives (index UTC)."""
     ok = prix.notna().to_numpy()
     t0 = prix.index[0]
@@ -85,11 +115,18 @@ def fit(prix: pd.Series, cal: pd.DataFrame, sauts: bool = True, ancrage_jours: i
     beta, *_ = np.linalg.lstsq(X[ok], prix.to_numpy()[ok], rcond=None)
     resid = pd.Series(prix.to_numpy() - X @ beta, index=prix.index)
 
-    # AR(1) sur les paires d'heures consécutives toutes deux connues
-    r, r1 = resid.to_numpy()[1:], resid.to_numpy()[:-1]
-    pair = ~np.isnan(r) & ~np.isnan(r1)
-    phi = float(np.dot(r1[pair], r[pair]) / np.dot(r1[pair], r1[pair]))
-    eps = r[pair] - phi * r1[pair]
+    phi_n, chocs_n, dernier_niveau = 0.0, np.array([]), 0.0
+    if deux_facteurs:
+        # Niveau journalier N = moyenne du résidu sur chaque jour local
+        jour = cal["date_local"].to_numpy()
+        niveau = resid.groupby(jour).mean()
+        niveau = niveau.reindex(pd.date_range(niveau.index.min(), niveau.index.max(), freq="D"))
+        phi_n, chocs_n = _ar1(niveau.to_numpy())
+        dernier_niveau = float(niveau.dropna().iloc[-1])
+        resid = resid - niveau.reindex(jour).to_numpy()     # u(t) = résidu - N(jour)
+
+    # AR(1) horaire sur les paires d'heures consécutives toutes deux connues
+    phi, eps = _ar1(resid.to_numpy())
 
     p_saut, tailles = 0.0, np.array([])
     if sauts:
@@ -107,6 +144,13 @@ def fit(prix: pd.Series, cal: pd.DataFrame, sauts: bool = True, ancrage_jours: i
         decalage = float(np.nanmean(resid.to_numpy()[recent]))
 
     last = resid.dropna()
+    if deux_facteurs:      # le décalage d'ancrage porte sur le niveau, pas sur l'écart horaire
+        return PriceModel(beta=beta, t0=t0, phi=phi, sigma=sigma, p_saut=p_saut, sauts=tailles,
+                          decalage=decalage, dernier_residu=float(last.iloc[-1]),
+                          deux_facteurs=True, phi_n=phi_n, chocs_n=chocs_n,
+                          dernier_niveau=dernier_niveau - decalage,
+                          infos={"n_heures": int(ok.sum()), "sauts": bool(sauts),
+                                 "ancrage_jours": ancrage_jours or 0, "deux_facteurs": True})
     return PriceModel(beta=beta, t0=t0, phi=phi, sigma=sigma, p_saut=p_saut, sauts=tailles,
                       decalage=decalage, dernier_residu=float(last.iloc[-1]) - decalage,
                       infos={"n_heures": int(ok.sum()), "sauts": bool(sauts), "ancrage_jours": ancrage_jours or 0})
@@ -119,21 +163,31 @@ def simulate(model: PriceModel, cal_future: pd.DataFrame, n: int = 1000, seed: i
     det = design(cal_future, model.t0) @ model.beta + model.decalage
     H = len(det)
     x = np.full(n, model.dernier_residu)
+    niveau = np.full(n, model.dernier_niveau)
+    jours = cal_future["date_local"].to_numpy() if model.deux_facteurs else None
     out = np.empty((n, H))
     for t in range(H):
+        if model.deux_facteurs and (t == 0 or jours[t] != jours[t - 1]):
+            # nouveau jour local : le niveau évolue, choc tiré parmi les chocs journaliers observés
+            niveau = model.phi_n * niveau + rng.choice(model.chocs_n, size=n)
         shock = rng.normal(0.0, model.sigma, n)
         if model.p_saut > 0 and len(model.sauts):
             jump = rng.random(n) < model.p_saut
             shock[jump] = rng.choice(model.sauts, size=int(jump.sum()))
         x = model.phi * x + shock
-        out[:, t] = det[t] + x
+        out[:, t] = det[t] + x + (niveau if model.deux_facteurs else 0.0)
     return out
 
 
 # --- Un mois complet : utilisé par la validation (script 13) ET par l'API ------
 FENETRE_MOIS = 24
-VARIANTES = {"ou": {"sauts": False}, "ou_sauts": {"sauts": True},
-             "ou_sauts_ancrage": {"sauts": True, "ancrage_jours": 28}}
+VARIANTES = {
+    "ou": {"sauts": False},
+    "ou_sauts": {"sauts": True},
+    "ou_sauts_ancrage": {"sauts": True, "ancrage_jours": 28},
+    "deux_facteurs": {"sauts": True, "deux_facteurs": True},
+    "deux_facteurs_ancrage": {"sauts": True, "ancrage_jours": 28, "deux_facteurs": True},
+}
 
 
 def calendrier(index_utc: pd.DatetimeIndex, tz: str = "Europe/Paris") -> pd.DataFrame:

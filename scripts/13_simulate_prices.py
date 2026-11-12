@@ -4,9 +4,10 @@ Protocole, calqué sur le volet 1 :
 - Pour chaque mois M, le modèle est estimé sur les 24 mois qui précèdent
   (tout ce qui est connu la veille du 1er du mois : les prix d'un jour sont
   publiés la veille), puis 1 000 trajectoires horaires de M sont simulées.
-- Trois variantes : « ou » (déterministe + retour à la moyenne),
+- Cinq variantes : « ou » (déterministe + retour à la moyenne),
   « ou_sauts » (+ sauts), « ou_sauts_ancrage » (+ niveau recalé sur les
-  28 derniers jours).
+  28 derniers jours), et le modèle à deux facteurs (niveau journalier
+  persistant + écart horaire) sans et avec ancrage.
 - Choix de la variante sur la VALIDATION (nov. 2024 → oct. 2025) par le CRPS
   moyen, la règle de score qui juge à la fois la justesse et la largeur des
   intervalles ; test une seule fois (nov. 2025 → oct. 2026).
@@ -52,7 +53,8 @@ def run_period(a, b, params, keep=False):
         ev = simulation.evaluate(sims, fut["prix"].to_numpy())
         pits.append(ev.pop("pit"))
         rows.append({"mois": m0.strftime("%Y-%m"), "heures": int(fut["prix"].notna().sum()), **ev,
-                     "phi": model.phi, "demi_vie_h": model.demi_vie_h, "p_saut": model.p_saut})
+                     "phi": model.phi, "demi_vie_h": model.demi_vie_h, "p_saut": model.p_saut,
+                     "phi_niveau": model.phi_n if model.deux_facteurs else np.nan})
         if keep:
             q = np.quantile(sims, simulation.QUANTILES, axis=0)
             kept.append(pd.DataFrame(q.T, index=fut.index, columns=[f"q{int(x * 100):02d}" for x in simulation.QUANTILES])
@@ -78,7 +80,7 @@ for nom, params in VARIANTES.items():
         mlflow.set_tags({"variante": nom, "periode": "validation"})
         mlflow.log_params({**{k: str(v) for k, v in params.items()}, "fenetre_mois": FENETRE_MOIS, "n_traj": N_TRAJ})
         mlflow.log_metrics(agg)
-    print(f"[validation] {nom:<18} CRPS {agg['crps']:6.2f} €/MWh ; couverture 90 % : {agg['couverture_90']:.1%} ; "
+    print(f"[validation] {nom:<22} CRPS {agg['crps']:6.2f} €/MWh ; couverture 90 % : {agg['couverture_90']:.1%} ; "
           f"50 % : {agg['couverture_50']:.1%} ; largeur 90 % : {agg['largeur_90']:.0f} €/MWh")
 
 val = pd.DataFrame(resultats)
@@ -96,7 +98,7 @@ for nom, params in VARIANTES.items():          # le test de toutes les variantes
         mlflow.log_metrics(agg)
     if kept is not None:
         quant_test = kept
-    print(f"[test]       {nom:<18} CRPS {agg['crps']:6.2f} €/MWh ; couverture 90 % : {agg['couverture_90']:.1%} ; "
+    print(f"[test]       {nom:<22} CRPS {agg['crps']:6.2f} €/MWh ; couverture 90 % : {agg['couverture_90']:.1%} ; "
           f"50 % : {agg['couverture_50']:.1%} ; négatifs réels {agg['part_negatifs_reel']:.1%} / simulés {agg['part_negatifs_simule']:.1%}")
 
 import json  # noqa: E402
@@ -114,7 +116,7 @@ md = res[cols].round(3).to_markdown(index=False)
 detail = details[(retenue, "test")]
 (config.REPORTS_DIR / "simulation_test_par_mois.md").write_text(
     detail[["mois", "crps", "couverture_90", "couverture_50", "moyenne_reelle", "moyenne_simulee_q05",
-            "moyenne_simulee_q95", "phi", "demi_vie_h", "p_saut"]].round(3).to_markdown(index=False), encoding="utf-8")
+            "moyenne_simulee_q95", "phi", "demi_vie_h", "p_saut", "phi_niveau"]].round(3).to_markdown(index=False), encoding="utf-8")
 print("\n" + md)
 print(f"\nDétail mensuel du test ({retenue}) :\n" + detail[["mois", "crps", "couverture_90", "moyenne_reelle",
       "moyenne_simulee_q05", "moyenne_simulee_q95"]].round(2).to_string(index=False))
@@ -144,10 +146,18 @@ fig.tight_layout()
 fig.savefig(out_fig / "simulation_eventail.png", dpi=160, bbox_inches="tight")
 plt.close(fig)
 
+# Au plus 3 variantes en couleur (lisibilité, daltonisme) : la base, la meilleure à un
+# facteur et la meilleure à deux facteurs, selon la validation.
+v = val.set_index("variante")["crps"]
+un = v[[k for k in v.index if not k.startswith("deux")]]
+deux = v[[k for k in v.index if k.startswith("deux")]]
+montrees = list(dict.fromkeys(["ou", un.idxmin(), deux.idxmin() if len(deux) else retenue]))[:3]
+COUL = dict(zip(montrees, ("#2a78d6", "#eb6834", "#1baf7a")))
+
 # Calibration : couverture par mois (test) et PIT de la variante retenue
 fig, axes = plt.subplots(1, 2, figsize=(12, 3.9))
 ax = axes[0]
-for nom, col in zip(VARIANTES, ("#2a78d6", "#eb6834", "#1baf7a")):
+for nom, col in COUL.items():
     d = details[(nom, "test")]
     ax.plot(pd.to_datetime(d["mois"]), d["couverture_90"] * 100, color=col, marker="o", ms=3.5, mec=SURFACE,
             mew=0.8, label=nom)
@@ -169,4 +179,21 @@ ax.grid(axis="x", visible=False)
 fig.tight_layout()
 fig.savefig(out_fig / "simulation_calibration.png", dpi=160, bbox_inches="tight")
 plt.close(fig)
-print(f"Graphiques : {out_fig / 'simulation_eventail.png'}, {out_fig / 'simulation_calibration.png'}")
+# Moyenne mensuelle : intervalle 90 % simulé contre prix moyen réel (le défaut visé par les deux facteurs)
+fig, ax = plt.subplots(figsize=(11, 4))
+decal = {nom: k for nom, k in zip(montrees, (-8, 0, 8))}
+for nom, col in COUL.items():
+    d = details[(nom, "test")]
+    x = pd.to_datetime(d["mois"]) + pd.to_timedelta(decal[nom], unit="D")
+    lo, hi = d["moyenne_simulee_q05"], d["moyenne_simulee_q95"]
+    ax.vlines(x, lo, hi, color=col, lw=4, alpha=0.85, label=f"{nom} : intervalle 90 %")
+d0 = details[(retenue, "test")]
+ax.plot(pd.to_datetime(d0["mois"]), d0["moyenne_reelle"], "o", color=INK, ms=6, mec=SURFACE, mew=1, label="Prix moyen réel")
+ax.set_ylabel("€/MWh")
+ax.set_title("Prix moyen du mois : intervalle 90 % simulé et réel (test)", pad=24)
+ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=4, fontsize=8, borderaxespad=0.3)
+fig.tight_layout()
+fig.savefig(out_fig / "simulation_moyenne_mensuelle.png", dpi=160, bbox_inches="tight")
+plt.close(fig)
+print(f"Graphiques : {out_fig / 'simulation_eventail.png'}, {out_fig / 'simulation_calibration.png'}, "
+      f"{out_fig / 'simulation_moyenne_mensuelle.png'}")

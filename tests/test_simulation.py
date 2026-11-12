@@ -62,3 +62,53 @@ def test_month_without_previous_prices_is_refused():
     df = fake_prices(end="2025-03-01")
     with pytest.raises(ValueError, match="Prix inconnus"):
         simulation.simulate_month(df, "2025-06", {"sauts": True}, n=50)
+
+
+def fake_two_factor(phi_n=0.9, sd_n=15.0, phi=0.8, sigma=5.0, start="2023-01-01", end="2025-04-01", seed=2):
+    """Prix factices avec un VRAI niveau journalier persistant + un écart horaire rapide."""
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range(pd.Timestamp(start, tz="Europe/Paris").tz_convert("UTC"),
+                        pd.Timestamp(end, tz="Europe/Paris").tz_convert("UTC"), freq="h", inclusive="left")
+    cal = simulation.calendrier(idx)
+    det = 60 + 15 * np.sin(2 * np.pi * (cal["heure"].to_numpy() - 5) / 24)
+    days = cal["date_local"].to_numpy()
+    level, x, out = 0.0, 0.0, np.empty(len(idx))
+    for t in range(len(idx)):
+        if t == 0 or days[t] != days[t - 1]:
+            level = phi_n * level + rng.normal(0, sd_n)
+        x = phi * x + rng.normal(0, sigma)
+        out[t] = det[t] + level + x
+    return cal.assign(prix=out)
+
+
+def test_two_factor_fit_recovers_daily_persistence():
+    df = fake_two_factor()
+    m = simulation.fit(df["prix"], df, sauts=False, deux_facteurs=True)
+    assert abs(m.phi_n - 0.9) < 0.05                     # persistance du niveau journalier retrouvée
+    # φ horaire : estimé APRÈS retrait de la moyenne de chaque jour, il ne mesure
+    # que la persistance à l'intérieur d'une journée (biais vers le bas attendu).
+    assert 0.6 < m.phi < 0.8
+    assert m.demi_vie_niveau_j > 4
+
+
+def test_two_factor_gives_realistic_uncertainty_on_the_monthly_mean():
+    # Sur des données à niveau persistant, le modèle à un facteur sous-estime
+    # fortement la dispersion de la moyenne du mois ; le modèle à deux facteurs non.
+    df = fake_two_factor(end="2025-04-01")
+    one = simulation.simulate_month(df, "2025-03", {"sauts": False}, n=400)[1].mean(axis=1).std()
+    two = simulation.simulate_month(df, "2025-03", {"sauts": False, "deux_facteurs": True}, n=400)[1].mean(axis=1).std()
+    # Écart-type théorique de la moyenne sur n = 31 jours d'un niveau AR(1) (φ = 0,9 ; σ = 15)
+    # dont la valeur de départ est connue : σ/n · √Σ_i ((1 - φ^(n-i+1)) / (1 - φ))²
+    phi, sd, n = 0.9, 15.0, 31
+    theorie = sd / n * np.sqrt(sum(((1 - phi ** (n - i + 1)) / (1 - phi)) ** 2 for i in range(1, n + 1)))
+    assert abs(two - theorie) / theorie < 0.2
+    assert two > one
+
+
+def test_two_factor_month_uses_only_past_prices():
+    df = fake_two_factor(end="2025-04-01")
+    p = {"sauts": True, "deux_facteurs": True, "ancrage_jours": 28}
+    a = simulation.simulate_month(df, "2025-03", p, n=100)[1]
+    altered = df.copy()
+    altered.loc[altered.index >= simulation.bornes_mois("2025-03")[0], "prix"] -= 500
+    np.testing.assert_allclose(a, simulation.simulate_month(altered, "2025-03", p, n=100)[1])
