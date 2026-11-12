@@ -1,0 +1,30 @@
+# Copie ce fichier en `sources.toml` (non commité) et remplace les A_REMPLIR.
+# Valeurs pré-remplies d'après le README du projet A (eco2mix-fabric).
+#
+# Espace de travail : ouvre le Lakehouse dans Fabric. L'URL ressemble à
+#   https://app.fabric.microsoft.com/groups/<ID espace>/lakehouses/<ID lakehouse>
+# Le nom affiché de l'espace fonctionne ; s'il contient des espaces ou des
+# accents, mets plutôt les deux identifiants (GUID) de l'URL, pour workspace ET lakehouse.
+
+[fabric]
+workspace = "eco2mix"          # nom ou GUID de l'espace de travail
+lakehouse = "lh_eco2mix"       # Lakehouse créé sans schémas : pas de ligne `schema`
+
+[fabric.eco2mix]
+# Copie du silver SANS vecteurs de suppression, recréée à chaque exécution du
+# notebook 02_silver_qualite (DECISIONS.md, D13). Le silver lui-même est
+# illisible par `deltalake` à cause de ses vecteurs de suppression.
+table = "export_ml_eco2mix"    # 1 ligne par relevé, clé ts_utc (30 min jusqu'au 31/08/2026, 15 min ensuite)
+fuseau = "UTC"                 # ts_utc est en UTC
+
+[fabric.eco2mix.colonnes]
+# nom attendu par le code = nom de la colonne dans TA table.
+# Noms confirmés par la liste MESURES du notebook 02_silver_qualite (11/11/2026).
+date_heure = "ts_utc"
+consommation = "consommation"
+prevision_j1 = "prevision_j1"
+# Facultatives (exploration et volet prix) : supprime celles que tu n'as pas.
+prevision_j = "prevision_j"
+nucleaire = "nucleaire"
+eolien = "eolien"
+solaire = "solaire"

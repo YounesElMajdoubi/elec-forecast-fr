@@ -1,0 +1,64 @@
+"""Tests de l'API sur un petit jeu FACTICE et un modèle LightGBM minuscule."""
+import pandas as pd
+import pytest
+
+pytest.importorskip("fastapi")
+from fastapi.testclient import TestClient  # noqa: E402
+
+from elecfr import serving  # noqa: E402
+from test_models import fake  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def client(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("api")
+    df = fake(start="2024-01-01", end="2024-04-15")
+    df["rte_j1"] = df["consommation"] + 100
+    df.loc[df["date_local"] >= pd.Timestamp("2024-04-10"), "consommation"] = float("nan")  # « futur » sans réel
+    df.to_parquet(tmp / "dataset.parquet")
+    booster, meta = serving.train_final(df, {"n_estimators": 20, "num_leaves": 7})
+    serving.save(booster, meta, tmp / "models")
+
+    import os
+    os.environ["ELECFR_DATA"] = str(tmp / "dataset.parquet")
+    os.environ["ELECFR_MODELS"] = str(tmp / "models")
+    from elecfr.api import app
+    with TestClient(app) as c:
+        yield c
+
+
+def test_health(client):
+    r = client.get("/health")
+    assert r.status_code == 200 and r.json()["statut"] == "ok"
+
+
+def test_forecast_returns_one_value_per_hour(client):
+    r = client.get("/forecast", params={"date": "2024-03-05"})
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["heures"]) == 24 and body["unite"] == "MW"
+    assert all(h["prevision_mw"] is not None for h in body["heures"])
+    assert body["dans_la_periode_d_entrainement"] is True and body["avertissement"]
+
+
+def test_forecast_dst_day_has_23_hours(client):
+    assert len(client.get("/forecast", params={"date": "2024-03-31"}).json()["heures"]) == 23
+
+
+def test_forecast_day_without_truth(client):
+    body = client.get("/forecast", params={"date": "2024-04-12"}).json()
+    assert body["mae_jour_mw"] is None and body["heures"][0]["reel_mw"] is None
+    assert body["dans_la_periode_d_entrainement"] is False
+
+
+def test_errors(client):
+    assert client.get("/forecast", params={"date": "2030-01-01"}).status_code == 404
+    assert client.get("/forecast", params={"date": "pas-une-date"}).status_code == 422
+    assert client.get("/forecast").status_code == 422
+    assert client.get("/simulate", params={"month": "2026-11"}).status_code == 501
+
+
+def test_openapi_documents_response_fields(client):
+    schemas = client.get("/openapi.json").json()["components"]["schemas"]
+    assert {"Prevision", "Heure", "Sante"} <= set(schemas)
+    assert "prevision_mw" in schemas["Heure"]["properties"]

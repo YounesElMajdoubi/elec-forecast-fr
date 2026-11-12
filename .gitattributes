@@ -1,0 +1,4 @@
+# Fins de ligne Unix dans le dépôt, quel que soit le système (Dockerfile, CI Linux)
+* text=auto eol=lf
+*.png binary
+*.parquet binary

@@ -1,0 +1,25 @@
+name: tests
+on: [push, pull_request]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      # PyTorch n'est pas installé ici (trop lourd) : les tests du LSTM sont sautés.
+      - run: pip install -e ".[dev,api]"
+      - run: pytest -q
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: pytest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Construire l'image de l'API
+        run: docker build -t elecfr-api .
+      - name: Vérifier que l'image démarre sa pile Python
+        run: docker run --rm --entrypoint python elecfr-api -c "import elecfr.api, lightgbm, fastapi; print('ok')"

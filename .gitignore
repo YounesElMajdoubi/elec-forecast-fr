@@ -1,0 +1,22 @@
+# Environnement et secrets
+.venv/
+.env
+sources.toml
+
+# Python
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# Données, modèles entraînés et suivi MLflow : à la RACINE seulement.
+# Le « / » initial est indispensable : sans lui, « data/ » exclurait aussi
+# le code de src/elecfr/data/ (et « models/ » celui de src/elecfr/models/).
+/data/
+/models/
+/mlruns/
+/mlartifacts/
+/mlflow.db
+
+# Sorties régénérables (les graphiques et comparaison.md, eux, sont publiés)
+/reports/*.csv
+/reports/previsions/
